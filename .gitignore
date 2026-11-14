@@ -8,3 +8,4 @@ MvSdkLog/
 .cache/
 config.yml
 camera.yml
+__pycache__/

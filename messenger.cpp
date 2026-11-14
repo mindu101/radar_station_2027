@@ -53,7 +53,7 @@ namespace rm
                 printf("Timer: %hu:%hu\n",buf.game_status.stage_remain_time/60,buf.game_status.stage_remain_time%60);
                 if(buf.game_status.game_progress==4)
                 {
-                    if(buf.game_status.stage_remain_time<300&&vulnerated<1||buf.game_status.stage_remain_time<180&&vulnerated<2)
+                    if((buf.game_status.stage_remain_time<300&&vulnerated<1)||(buf.game_status.stage_remain_time<180&&vulnerated<2))
                     {
                         ++vulnerated;
                         printf("Double vulnerabilitiy triggered due to timeout\n");
@@ -80,19 +80,18 @@ namespace rm
                 serial_info.stage_remain_time=buf.winner;
             break;
             case 0x0003:
-                printf("HP from serial:");
-                for(size_t i=0;i<8;++i)
-                    printf(" %hd",buf.game_robot_HP.ally_HP[i]);
-                for(size_t i=0;i<2;++i)
-                    printf(" %hu",buf.game_robot_HP.opponent_HP[i]);
-                printf("\n");
-                if(serial_info.game_progress==4&&(buf.game_robot_HP.ally_HP[6]<1000&&vulnerated<1||buf.game_robot_HP.ally_HP[7]<5000&&vulnerated<2))
+                printf("HP from serial: ally1=%hu ally3=%hu ally4=%hu ally7=%hu outpostR=%hu base=%hu outpostB=%hu enemyBase=%hu\n",
+                    buf.game_robot_HP.ally_1_robot_HP,buf.game_robot_HP.ally_3_robot_HP,
+                    buf.game_robot_HP.ally_4_robot_HP,buf.game_robot_HP.ally_7_robot_HP,
+                    buf.game_robot_HP.outpost_R_HP,buf.game_robot_HP.ally_base_HP,
+                    buf.game_robot_HP.outpost_B_HP,buf.game_robot_HP.enemy_base_HP);
+                if(serial_info.game_progress==4&&((buf.game_robot_HP.outpost_R_HP<1000&&vulnerated<1)||(buf.game_robot_HP.ally_base_HP<5000&&vulnerated<2)))
                 {
                     ++vulnerated;
                     printf("Double vulnerabilitiy triggered due to low HP\n");
                 }
-                serial_info.ally_outpost_base_HP=buf.game_robot_HP.ally_HP[6]+buf.game_robot_HP.ally_HP[7];
-                serial_info.foe_outpost_base_HP=buf.game_robot_HP.opponent_HP[0]+buf.game_robot_HP.opponent_HP[1];
+                serial_info.ally_outpost_base_HP=buf.game_robot_HP.outpost_R_HP+buf.game_robot_HP.ally_base_HP;
+                serial_info.foe_outpost_base_HP=buf.game_robot_HP.outpost_B_HP+buf.game_robot_HP.enemy_base_HP;
             break;
             case 0x0104:
                 printf("Robot %hhu is %s %hhu time(s)!\n",buf.referee_warning.offending_robot_id,buf.referee_warning.level>=3?"punished":"warned",buf.referee_warning.count);
@@ -115,15 +114,8 @@ namespace rm
                 serial_info.robot_id=buf.robot_status.robot_id;
             break;
             case 0x020C:
-                printf("Marked: ");
-                for(uint8_t i=1;i<1<<6;i<<=1)
-                    printf("%c",buf.radar_mark_data.foe_mark&i?'1':'0');
-                printf(" ");
-                for(uint8_t i=1;i<1<<6;i<<=1)
-                    printf("%c",buf.radar_mark_data.ally_mark&i?'1':'0');
-                printf("\n");
-                serial_info.foe_mark=buf.radar_mark_data.foe_mark;
-                serial_info.ally_mark=buf.radar_mark_data.ally_mark;
+                serial_info.mark_progress=buf.radar_mark_data.mark_progress;
+                printf("Radar mark progress: %hu\n",serial_info.mark_progress);
             break;
             case 0x020E:
                 printf("Double vulnerabilities: %hhu%c\n",buf.radar_info.vulnerability,buf.radar_info.vulnerating?'*':' ');
@@ -134,6 +126,14 @@ namespace rm
                 if(serial_info.encrypt_level<buf.radar_info.encrypt_level)
                     password_retries=0;
                 serial_info.encrypt_level=buf.radar_info.encrypt_level,serial_info.encrypt_changeable=buf.radar_info.encrypt_changeable;
+                serial_info.armor_fortify_active=buf.radar_info.armor_fortify_active;
+                serial_info.armor_fortify_remaining=buf.radar_info.armor_fortify_remaining;
+                serial_info.fortify_center_x=buf.radar_info.fortify_center_x;
+                serial_info.fortify_center_y=buf.radar_info.fortify_center_y;
+                serial_info.fortify_radius=buf.radar_info.fortify_radius;
+                printf("Armor fortify: active=%hhu remaining=%hhu center=(%hu,%hu) radius=%hu\n",
+                    serial_info.armor_fortify_active,serial_info.armor_fortify_remaining,
+                    serial_info.fortify_center_x,serial_info.fortify_center_y,serial_info.fortify_radius);
             break;
             case 0x0301:
                 printf("Received data from another robot:\ncmd_id: 0x%04hx sender_id: 0x%04hx ",buf.robot_interaction_data.header.data_cmd_id,buf.robot_interaction_data.header.sender_id);
@@ -158,19 +158,55 @@ namespace rm
                 }
             break;
             case 0x0A01:
-                for(size_t i=0;i<6;++i)
-                    if(pos_cache[i]<=0&&buf.map_robot.data[i*2]>0&&buf.map_robot.data[i*2+1]>0)
+                // Wire order is 1, reserved, 3, 4, reserved, 7.  Keep the
+                // application-facing six-slot layout (hero, engineer,
+                // infantry 3/4/5, sentry) and leave the reserved slot empty.
+                {
+                    const uint16_t wire_pos[12]={
+                        buf.radio_position_data.robot_1_x,buf.radio_position_data.robot_1_y,
+                        0,0,
+                        buf.radio_position_data.robot_3_x,buf.radio_position_data.robot_3_y,
+                        buf.radio_position_data.robot_4_x,buf.radio_position_data.robot_4_y,
+                        0,0,
+                        buf.radio_position_data.robot_7_x,buf.radio_position_data.robot_7_y};
+                    for(size_t i=0;i<6;++i)
+                    if(pos_cache[i]<=0&&wire_pos[i*2]>0&&wire_pos[i*2+1]>0)
                     {
                         pos_cache[i]=0; //Make sure the pos being modified is not used
                         printf("Robot position updated (%zu)\n",i);
-                        pos_from_radio.data[i*2]=buf.map_robot.data[i*2],pos_from_radio.data[i*2+1]=buf.map_robot.data[i*2+1];
+                        pos_from_radio.data[i*2]=wire_pos[i*2],pos_from_radio.data[i*2+1]=wire_pos[i*2+1];
                         pos_cache[i]=-20; //Override radar's pos for 2 secs
                     }
+                }
             break;
             case 0x0A02:
-                printf("HP from radio:");
-                for(size_t i=0;i<6;++i)
-                    printf(" %hd",buf.game_robot_HP.foe_HP[i]);
+                printf("HP from radio: %hu %hu %hu %hu %hu %hu",
+                    buf.radio_hp_data.robot_1,buf.radio_hp_data.reserved_1,
+                    buf.radio_hp_data.robot_3,buf.radio_hp_data.robot_4,
+                    buf.radio_hp_data.reserved_2,buf.radio_hp_data.robot_7);
+                for(size_t i=0;i<sizeof(hp_from_radio);++i)
+                    reinterpret_cast<volatile uint8_t*>(&hp_from_radio)[i]=reinterpret_cast<const uint8_t*>(&buf.radio_hp_data)[i];
+                printf("\n");
+            break;
+            case 0x0A03:
+                for(size_t i=0;i<sizeof(ammo_from_radio);++i)
+                    reinterpret_cast<volatile uint8_t*>(&ammo_from_radio)[i]=reinterpret_cast<const uint8_t*>(&buf.radio_ammo_data)[i];
+                printf("Ammo from radio: %hu %hu %hu %hu %hu\n",
+                    buf.radio_ammo_data.robot_1,buf.radio_ammo_data.robot_3,
+                    buf.radio_ammo_data.robot_4,buf.radio_ammo_data.reserved,
+                    buf.radio_ammo_data.robot_7);
+            break;
+            case 0x0A04:
+                for(size_t i=0;i<sizeof(team_status_from_radio);++i)
+                    reinterpret_cast<volatile uint8_t*>(&team_status_from_radio)[i]=reinterpret_cast<const uint8_t*>(&buf.radio_team_status)[i];
+                printf("Team status from radio: coins=%hu total=%hu buffs=0x%08x terrain=0x%08x\n",
+                    buf.radio_team_status.remaining_coins,buf.radio_team_status.total_coins,
+                    buf.radio_team_status.active_buffs,buf.radio_team_status.terrain_and_control);
+            break;
+            case 0x0A05:
+                for(size_t i=0;i<sizeof(buffs_from_radio);++i)
+                    reinterpret_cast<volatile uint8_t*>(&buffs_from_radio)[i]=reinterpret_cast<const uint8_t*>(&buf.radio_buff_data)[i];
+                printf("Buff/status from radio updated\n");
             break;
             case 0x0A06:
                 printf("Password: ");
@@ -248,7 +284,11 @@ namespace rm
     }
     bool msg::referee_send(uint16_t cmd_id, uint16_t data_length, const void* data)
     {
-        union frame buf={{{0xA5,data_length,++seq},cmd_id}};
+        if((data_length && !data)||data_length>MAX_BUF-sizeof(header)-sizeof(cmd_id)-sizeof(frame_tail))
+            return false;
+        union frame buf{};
+        buf.header={0xA5,data_length,++seq,0};
+        buf.cmd_id=cmd_id;
         const size_t buf_len=sizeof(buf.header)+sizeof(buf.cmd_id)+buf.header.data_length+sizeof(frame_tail);
         Append_CRC8_Check_Sum(reinterpret_cast<uint8_t*>(&buf.header),sizeof(buf.header));
         memcpy(buf.data+sizeof(buf.header)+sizeof(buf.cmd_id),data,data_length);
@@ -271,7 +311,7 @@ namespace rm
                 std::this_thread::sleep_for(std::chrono::milliseconds(250));
             }
             uint8_t team=serial_info.robot_id/100;
-            union both_robot_pos pos={.data={0}};
+            union both_robot_pos pos{};
             timer::time_point target=timer::now()+interval;
             if(timer::now()>timestamp[0])
             {
@@ -317,17 +357,23 @@ namespace rm
             }
             if(timer::now()>timestamp[1])
             {
-                if(serial_info.game_progress==4&&(serial_info.vulnerability>0||serial_info.encrypt_changeable||password_retries>0))
+                if(serial_info.game_progress==4&&(serial_info.vulnerability>0||serial_info.encrypt_changeable||password_retries>0||armor_fortify))
                 {
                     //Send cmd
-                    struct robot_interaction_data buf={{0x0121,serial_info.robot_id,0x8080},{{std::min(vulnerated,cmd)}}};
-                    if(buf.cmd.password_cmd=(password_retries>0?2:0))
+                    struct robot_interaction_data buf{};
+                    buf.header={0x0121,serial_info.robot_id,0x8080};
+                    buf.cmd.radar_cmd=std::min(vulnerated,cmd);
+                    buf.cmd.password_cmd=(password_retries>0?2:0);
+                    if(buf.cmd.password_cmd)
                         memcpy(&buf.cmd.password,&guessed_password,sizeof(guessed_password)),--password_retries;
-                    else if(buf.cmd.password_cmd=serial_info.encrypt_changeable)
+                    else if((buf.cmd.password_cmd=serial_info.encrypt_changeable)!=0)
                     {
                         std::vector<uint8_t> pwd=generate_password(6);
                         memcpy(&buf.cmd.password,pwd.data(),pwd.size());
                     }
+                    buf.cmd.armor_fortify_cmd=armor_fortify;
+                    buf.cmd.fortify_center_x=fortify_center_x;
+                    buf.cmd.fortify_center_y=fortify_center_y;
                     if(referee_send(0x0301,sizeof(buf.header)+sizeof(buf.cmd),&buf))
                     {
                         #ifndef NDEBUG
@@ -359,7 +405,8 @@ namespace rm
             {
                 if(std::any_of(pos.opponent.data,pos.opponent.data+12,[](float x){return x!=0;}))
                 {
-                    struct robot_interaction_data buf={{0x0297,serial_info.robot_id,team*100+7}};
+                    struct robot_interaction_data buf{};
+                    buf.header={0x0297,serial_info.robot_id,static_cast<uint16_t>(team*100+7)};
                     memcpy(&buf.robot_pos,&pos.opponent,sizeof(pos.opponent));
                     if(referee_send(0x0301,sizeof(buf.header)+sizeof(buf.robot_pos),&buf))
                     {

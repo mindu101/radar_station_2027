@@ -30,10 +30,20 @@ namespace rm
     {
         struct
         {
-            uint16_t ally_HP[8]; //1234_7OB
-            uint16_t opponent_HP[2]; //OB
+            uint16_t ally_1_robot_HP;
+            uint16_t reserved;
+            uint16_t ally_3_robot_HP;
+            uint16_t ally_4_robot_HP;
+            int16_t damage_difference;
+            uint16_t ally_7_robot_HP;
+            uint16_t outpost_R_HP;
+            uint16_t ally_base_HP;
+            uint16_t outpost_B_HP;
+            uint16_t enemy_base_HP;
+            uint16_t ally_control_degree;
+            uint16_t enemy_control_degree;
         };
-        uint16_t foe_HP[6]; //1234_7
+        uint16_t data[12];
     };
     struct referee_warning
     {
@@ -64,19 +74,25 @@ namespace rm
         uint8_t power_management_chassis_output : 1;
         uint8_t power_management_shooter_output : 1;
     };
+    // 2027 protocol, command 0x020C.  This is the mark progress for the
+    // selected radar target, not the 2026 foe/ally bit masks.
     struct radar_mark_data
     {
-        uint8_t foe_mark : 6;
-        uint8_t ally_mark : 6;
-        uint8_t reserved : 4;
+        uint16_t mark_progress;
     };
     struct radar_info
     {
-        uint8_t vulnerability : 2;
-        uint8_t vulnerating : 1;
-        uint8_t encrypt_level : 2;
-        uint8_t encrypt_changeable : 1;
+        uint8_t vulnerability : 2;       // 0..2 available double-vulnerability uses
+        uint8_t vulnerating : 1;         // currently active
+        uint8_t encrypt_level : 2;       // opponent interference level, 1..3
+        uint8_t encrypt_changeable : 1;  // key may be changed
         uint8_t reserved : 2;
+        uint8_t armor_fortify_active : 1;
+        uint8_t armor_fortify_remaining : 3;
+        uint8_t armor_fortify_reserved : 4;
+        uint16_t fortify_center_x;
+        uint16_t fortify_center_y;
+        uint16_t fortify_radius;
     };
     union map_robot
     {
@@ -96,6 +112,60 @@ namespace rm
             uint16_t sentry_position_y;
         };
         uint16_t data[12];
+    };
+    // 0x0A01: positions sent by the official radio source.  The 2027 wire
+    // layout contains robots 1, 3, 4 and 7 with two reserved pairs.
+    struct radio_position_data
+    {
+        uint16_t robot_1_x;
+        uint16_t robot_1_y;
+        uint16_t reserved_1_x;
+        uint16_t reserved_1_y;
+        uint16_t robot_3_x;
+        uint16_t robot_3_y;
+        uint16_t robot_4_x;
+        uint16_t robot_4_y;
+        uint16_t reserved_2_x;
+        uint16_t reserved_2_y;
+        uint16_t robot_7_x;
+        uint16_t robot_7_y;
+    };
+    struct radio_hp_data
+    {
+        uint16_t robot_1;
+        uint16_t reserved_1;
+        uint16_t robot_3;
+        uint16_t robot_4;
+        uint16_t reserved_2;
+        uint16_t robot_7;
+    };
+    struct radio_ammo_data
+    {
+        uint16_t robot_1;
+        uint16_t robot_3;
+        uint16_t robot_4;
+        uint16_t reserved;
+        uint16_t robot_7;
+    };
+    struct radio_team_status
+    {
+        uint16_t remaining_coins;
+        uint16_t total_coins;
+        uint32_t active_buffs;
+        uint32_t terrain_and_control;
+    };
+    struct radio_buff_data
+    {
+        uint8_t data[47];
+    };
+    struct radar_command_data
+    {
+        uint8_t radar_cmd;
+        uint8_t password_cmd;
+        uint8_t password[6];
+        uint8_t armor_fortify_cmd;
+        uint16_t fortify_center_x;
+        uint16_t fortify_center_y;
     };
     union both_map_robot
     {
@@ -152,15 +222,20 @@ namespace rm
         } header;
         union
         {
-            struct
-            {
-                uint8_t radar_cmd;
-                uint8_t password_cmd;
-                uint8_t password[6];
-            } cmd;
+            struct radar_command_data cmd;
             union robot_pos robot_pos;
         };
     };
+    static_assert(sizeof(radar_mark_data)==2,"0x020C must be 2 bytes");
+    static_assert(sizeof(game_status)==11,"0x0001 must be 11 bytes");
+    static_assert(sizeof(game_robot_HP)==24,"0x0003 must be 24 bytes");
+    static_assert(sizeof(radar_info)==8,"0x020E must be 8 bytes");
+    static_assert(sizeof(radio_position_data)==24,"0x0A01 must be 24 bytes");
+    static_assert(sizeof(radio_hp_data)==12,"0x0A02 must be 12 bytes");
+    static_assert(sizeof(radio_ammo_data)==10,"0x0A03 must be 10 bytes");
+    static_assert(sizeof(radio_team_status)==12,"0x0A04 must be 12 bytes");
+    static_assert(sizeof(radio_buff_data)==47,"0x0A05 must be 47 bytes");
+    static_assert(sizeof(radar_command_data)==13,"0x0121 must be 13 bytes");
     union frame
     {
         struct
@@ -177,6 +252,11 @@ namespace rm
                 struct robot_status robot_status;
                 struct radar_mark_data radar_mark_data;
                 struct radar_info radar_info;
+                struct radio_position_data radio_position_data;
+                struct radio_hp_data radio_hp_data;
+                struct radio_ammo_data radio_ammo_data;
+                struct radio_team_status radio_team_status;
+                struct radio_buff_data radio_buff_data;
                 struct robot_interaction_data robot_interaction_data;
                 union map_robot map_robot;
                 uint8_t password[6];
@@ -193,12 +273,20 @@ namespace rm
         uint16_t foe_outpost_base_HP;
         uint8_t robot_id;
         uint8_t game_progress:3;
-        uint8_t foe_mark:6;
-        uint8_t ally_mark:6;
+        uint16_t mark_progress;
+        // Kept for source compatibility with the 2026 consumer code.  They
+        // are always zero in 2027; use mark_progress instead.
+        uint8_t foe_mark;
+        uint8_t ally_mark;
         uint8_t vulnerability:2;
         bool vulnerating:1;
         uint8_t encrypt_level:2;
         bool encrypt_changeable:1;
+        bool armor_fortify_active:1;
+        uint8_t armor_fortify_remaining:3;
+        uint16_t fortify_center_x;
+        uint16_t fortify_center_y;
+        uint16_t fortify_radius;
     };
     class msg
     {
@@ -223,11 +311,21 @@ namespace rm
         std::pair<std::vector<cv::Point2f>, std::vector<uint8_t>> pos_from_camera;
         volatile union both_robot_pos pos_from_sentry;
         volatile union map_robot pos_from_radio;
+        volatile struct radio_hp_data hp_from_radio;
+        volatile struct radio_ammo_data ammo_from_radio;
+        volatile struct radio_team_status team_status_from_radio;
+        volatile struct radio_buff_data buffs_from_radio;
         volatile int8_t pos_cache[12]; //Cache control, positive for sentry, negative for radio and zero for video
         uint8_t guessed_password[6];
         volatile uint8_t password_retries;
         volatile uint8_t vulnerated; //Double vulnerability trigger
-        msg(int referee_fd=-1, int radio_fd=-1):referee(referee_fd),radio(radio_fd),timestamp{timer::now(),timer::now(),timer::now()},cmd(0),seq(0),pos_cache{0},guessed_password{0},password_retries(0),vulnerated(0){}
+        // Commands controlled by the radar application.  Each counter is
+        // monotonic; the referee ignores a repeated value as required by
+        // protocol 0x0121.
+        volatile uint8_t armor_fortify;
+        volatile uint16_t fortify_center_x;
+        volatile uint16_t fortify_center_y;
+        msg(int referee_fd=-1, int radio_fd=-1):recv_buf{},rf_buf{},timestamp{timer::now(),timer::now(),timer::now()},cmd(0),seq(0),running(false),referee(referee_fd),radio(radio_fd),serial_info{},pos_from_camera{},pos_from_sentry{},pos_from_radio{},hp_from_radio{},ammo_from_radio{},team_status_from_radio{},buffs_from_radio{},pos_cache{0},guessed_password{0},password_retries(0),vulnerated(0),armor_fortify(0),fortify_center_x(0),fortify_center_y(0){}
         msg(const msg&)=delete; //Prevents thread problems
         msg& operator=(const msg&)=delete;
         msg(msg&&)=default;
