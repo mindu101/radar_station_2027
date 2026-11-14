@@ -12,7 +12,7 @@
 #include <sys/socket.h>
 #include <termios.h>
 #include <unistd.h>
-
+//封装一下linux的c语言底层调用，变成容易理解的类，集成CRC8.CRC16的裁判
 namespace serial {
 
 class stream {

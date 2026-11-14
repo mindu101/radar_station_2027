@@ -11,6 +11,8 @@
 #define SERIAL_SPEED B115200
 namespace rm
 {
+    //RODO
+    //密码不需要盲猜了
     std::vector<uint8_t> msg::generate_password(size_t len)
     {
         static const uint8_t hard_bytes[] = {
@@ -85,6 +87,7 @@ namespace rm
                     buf.game_robot_HP.ally_4_robot_HP,buf.game_robot_HP.ally_7_robot_HP,
                     buf.game_robot_HP.outpost_R_HP,buf.game_robot_HP.ally_base_HP,
                     buf.game_robot_HP.outpost_B_HP,buf.game_robot_HP.enemy_base_HP);
+                    //TODO 这里可能默认我方是红色或者直接以前写的没改，感觉是没改
                 if(serial_info.game_progress==4&&((buf.game_robot_HP.outpost_R_HP<1000&&vulnerated<1)||(buf.game_robot_HP.ally_base_HP<5000&&vulnerated<2)))
                 {
                     ++vulnerated;
@@ -97,6 +100,7 @@ namespace rm
                 printf("Robot %hhu is %s %hhu time(s)!\n",buf.referee_warning.offending_robot_id,buf.referee_warning.level>=3?"punished":"warned",buf.referee_warning.count);
             break;
             case 0x0105:
+            //用飞镖的信息作为按键触发双倍易伤，很聪明
                 static uint8_t pre_dart_target=0;
                 if(buf.dart_info.dart_target!=pre_dart_target)
                 {
@@ -110,6 +114,7 @@ namespace rm
                 }
             break;
             case 0x0201:
+                //red 9 ，blue 109
                 printf("Robot ID: %hhu (%s)\n",buf.robot_status.robot_id,buf.robot_status.robot_id/100?"Blue":"Red");
                 serial_info.robot_id=buf.robot_status.robot_id;
             break;
@@ -137,6 +142,7 @@ namespace rm
             break;
             case 0x0301:
                 printf("Received data from another robot:\ncmd_id: 0x%04hx sender_id: 0x%04hx ",buf.robot_interaction_data.header.data_cmd_id,buf.robot_interaction_data.header.sender_id);
+                //比赛模式会关停printf输出
                 #ifndef NDEBUG
                 printf("data:");
                 for(size_t i=sizeof(buf.header)+sizeof(buf.cmd_id)+sizeof(buf.robot_interaction_data.header);i<sizeof(buf.header)+sizeof(buf.cmd_id)+buf.header.data_length;++i)
@@ -145,6 +151,9 @@ namespace rm
                 printf("\n");
                 switch(buf.robot_interaction_data.header.data_cmd_id)
                 {
+                    //改一下，没有工程和英雄了。
+                    //我决定把所有的装逼的无锁同步功能全部改成有锁的，爱带锁这一块
+                    //当然，单个标志位只需要原子操作就行
                     case 0x0279: //Receive ally pos from sentry
                         for(size_t i=0;i<6;++i)
                             if(pos_cache[i+6]>=0&&buf.robot_interaction_data.robot_pos.data[i*2]>0&&buf.robot_interaction_data.robot_pos.data[i*2+1]>0)
@@ -282,6 +291,7 @@ namespace rm
             }
         }
     }
+    //总发送
     bool msg::referee_send(uint16_t cmd_id, uint16_t data_length, const void* data)
     {
         if((data_length && !data)||data_length>MAX_BUF-sizeof(header)-sizeof(cmd_id)-sizeof(frame_tail))
