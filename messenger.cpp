@@ -11,6 +11,21 @@
 #define SERIAL_SPEED B115200
 namespace rm
 {
+    namespace
+    {
+        // 当前帧的 payload 是否至少有 required 字节。不够就整帧丢弃，
+        // 避免用到接收缓冲区里上一帧残留的字节。
+        bool payload_long_enough(const union frame& buf, std::size_t required)
+        {
+            if(buf.header.data_length>=required)
+                return true;
+            #ifndef NDEBUG
+            fprintf(stderr,"Short payload for cmd 0x%04hx: %hu < %zu\n",
+                buf.cmd_id,buf.header.data_length,required);
+            #endif
+            return false;
+        }
+    }
     //RODO
     //密码不需要盲猜了
     std::vector<uint8_t> msg::generate_password(size_t len)
@@ -28,12 +43,19 @@ namespace rm
     }
     bool msg::serial_quick_setup(serial::terminal& port, const char* filename)
     {
-        if(filename)
+        // fd 已经打开（构造时传入，或重连前刚 close）时只重新配置 termios，
+        // 不盲目 reopen；fd 无效时才按路径打开。
+        if(port.get_fd()<0)
         {
-            if(port.open(filename)<0)
+            if(filename)
+            {
+                if(port.open(filename)<0)
+                    return false;
+            }
+            else if(port.open()<0)
                 return false;
         }
-        else if(port.open()<0)
+        else if(::tcgetattr(port.get_fd(),&port.options)<0)
             return false;
         port.set_rate(SERIAL_SPEED);
         port.options.c_cflag&=~(CSIZE|CSTOPB|PARENB);
@@ -50,6 +72,8 @@ namespace rm
         switch(buf.cmd_id)
         {
             case 0x0001:
+                if(!payload_long_enough(buf,sizeof(buf.game_status)))
+                    break;
                 if(buf.game_status.game_progress!=serial_info.game_progress)
                     printf("Game state changed to: %hhu\n",buf.game_status.game_progress);
                 printf("Timer: %hu:%hu\n",buf.game_status.stage_remain_time/60,buf.game_status.stage_remain_time%60);
@@ -61,12 +85,14 @@ namespace rm
                         printf("Double vulnerabilitiy triggered due to timeout\n");
                     }
                 }
-                else vulnerated=0,cmd=0;
+                else vulnerated=0,cmd=0,radar_cmd_sent=0,password_update_sent=false;
                 serial_info.game_progress=buf.game_status.game_progress;
                 if(buf.game_status.game_progress!=5)
                     serial_info.stage_remain_time=buf.game_status.stage_remain_time;
             break;
             case 0x0002:
+                if(!payload_long_enough(buf,sizeof(buf.winner)))
+                    break;
                 switch(buf.winner)
                 {
                     case 0:
@@ -79,28 +105,41 @@ namespace rm
                         printf("Result: Blue wins!\n");
                         break;
                 }
-                serial_info.stage_remain_time=buf.winner;
             break;
             case 0x0003:
-                printf("HP from serial: ally1=%hu ally3=%hu ally4=%hu ally7=%hu outpostR=%hu base=%hu outpostB=%hu enemyBase=%hu\n",
-                    buf.game_robot_HP.ally_1_robot_HP,buf.game_robot_HP.ally_3_robot_HP,
-                    buf.game_robot_HP.ally_4_robot_HP,buf.game_robot_HP.ally_7_robot_HP,
-                    buf.game_robot_HP.outpost_R_HP,buf.game_robot_HP.ally_base_HP,
-                    buf.game_robot_HP.outpost_B_HP,buf.game_robot_HP.enemy_base_HP);
-                    //TODO 这里可能默认我方是红色或者直接以前写的没改，感觉是没改
-                    //这个就是有问题，写的死编码，不能这样
-                if(serial_info.game_progress==4&&((buf.game_robot_HP.outpost_R_HP<1000&&vulnerated<1)||(buf.game_robot_HP.ally_base_HP<5000&&vulnerated<2)))
+                if(!payload_long_enough(buf,sizeof(buf.game_robot_HP)))
+                    break;
                 {
-                    ++vulnerated;
-                    printf("Double vulnerabilitiy triggered due to low HP\n");
+                    // 2027 协议 0x0003 固定 24 字节（表 1-8）：outpost_R/outpost_B
+                    // 是绝对的红/蓝前哨，ally_base/enemy_base 已相对己方，所以
+                    // 只需按 robot_id 百位选出己方的前哨。
+                    const bool blue=serial_info.robot_id/100;
+                    const uint16_t ally_outpost=blue?buf.game_robot_HP.outpost_B_HP:buf.game_robot_HP.outpost_R_HP;
+                    const uint16_t foe_outpost=blue?buf.game_robot_HP.outpost_R_HP:buf.game_robot_HP.outpost_B_HP;
+                    const uint16_t ally_base=buf.game_robot_HP.ally_base_HP;
+                    const uint16_t foe_base=buf.game_robot_HP.enemy_base_HP;
+                    printf("HP from serial: ally1=%hu ally3=%hu ally4=%hu ally7=%hu allyOutpost=%hu allyBase=%hu foeOutpost=%hu foeBase=%hu damageDiff=%hd\n",
+                        buf.game_robot_HP.ally_1_robot_HP,buf.game_robot_HP.ally_3_robot_HP,
+                        buf.game_robot_HP.ally_4_robot_HP,buf.game_robot_HP.ally_7_robot_HP,
+                        ally_outpost,ally_base,foe_outpost,foe_base,
+                        buf.game_robot_HP.damage_difference);
+                    if(serial_info.game_progress==4&&((ally_outpost<1000&&vulnerated<1)||(ally_base<5000&&vulnerated<2)))
+                    {
+                        ++vulnerated;
+                        printf("Double vulnerabilitiy triggered due to low HP\n");
+                    }
+                    serial_info.ally_outpost_base_HP=ally_outpost+ally_base;
+                    serial_info.foe_outpost_base_HP=foe_outpost+foe_base;
                 }
-                serial_info.ally_outpost_base_HP=buf.game_robot_HP.outpost_R_HP+buf.game_robot_HP.ally_base_HP;
-                serial_info.foe_outpost_base_HP=buf.game_robot_HP.outpost_B_HP+buf.game_robot_HP.enemy_base_HP;
             break;
             case 0x0104:
+                if(!payload_long_enough(buf,sizeof(buf.referee_warning)))
+                    break;
                 printf("Robot %hhu is %s %hhu time(s)!\n",buf.referee_warning.offending_robot_id,buf.referee_warning.level>=3?"punished":"warned",buf.referee_warning.count);
             break;
             case 0x0105:
+                if(!payload_long_enough(buf,sizeof(buf.dart_info)))
+                    break;
             //用飞镖的信息作为按键触发双倍易伤，很聪明
                 static uint8_t pre_dart_target=0;
                 if(buf.dart_info.dart_target!=pre_dart_target)
@@ -116,21 +155,38 @@ namespace rm
             break;
             case 0x0201:
                 //red 9 ，blue 109
+                // 这里只用 robot_id，不要求完整的 robot_status 长度。
+                if(!payload_long_enough(buf,sizeof(buf.robot_status.robot_id)))
+                    break;
                 printf("Robot ID: %hhu (%s)\n",buf.robot_status.robot_id,buf.robot_status.robot_id/100?"Blue":"Red");
                 serial_info.robot_id=buf.robot_status.robot_id;
             break;
             case 0x020C:
-            //TODO 有问题
+                if(!payload_long_enough(buf,sizeof(buf.radar_mark_data)))
+                    break;
                 serial_info.mark_progress=buf.radar_mark_data.mark_progress;
+                #ifndef NDEBUG
+                printf("Radar mark progress: %hu\n",serial_info.mark_progress);
+                #endif
             break;
             case 0x020E:
+                if(!payload_long_enough(buf,sizeof(buf.radar_info)))
+                    break;
                 printf("Double vulnerabilities: %hhu%c\n",buf.radar_info.vulnerability,buf.radar_info.vulnerating?'*':' ');
+                // cmd 记录累计获得的双倍易伤次数，必须按增量累加：如果开局
+                // 直接是 2 次可用，每次只 +1 会让 cmd 永远到不了 2，第二次请求发不出去。
                 if(serial_info.vulnerability<buf.radar_info.vulnerability)
-                    ++cmd;
+                    cmd+=buf.radar_info.vulnerability-serial_info.vulnerability;
                 serial_info.vulnerability=buf.radar_info.vulnerability,serial_info.vulnerating=buf.radar_info.vulnerating;
                 printf("Encrypt level: %hhu%c\n",buf.radar_info.encrypt_level,buf.radar_info.encrypt_changeable?'*':' ');
                 if(serial_info.encrypt_level<buf.radar_info.encrypt_level)
+                {
                     password_retries=0;
+                    password_update_sent=false;
+                }
+                // 每次重新获得修改权限时，只更新一次密钥。
+                if(!serial_info.encrypt_changeable&&buf.radar_info.encrypt_changeable)
+                    password_update_sent=false;
                 serial_info.encrypt_level=buf.radar_info.encrypt_level,serial_info.encrypt_changeable=buf.radar_info.encrypt_changeable;
                 serial_info.armor_fortify_active=buf.radar_info.armor_fortify_active;
                 serial_info.armor_fortify_remaining=buf.radar_info.armor_fortify_remaining;
@@ -142,6 +198,8 @@ namespace rm
                     serial_info.fortify_center_x,serial_info.fortify_center_y,serial_info.fortify_radius);
             break;
             case 0x0301:
+                if(!payload_long_enough(buf,sizeof(buf.robot_interaction_data.header)))
+                    break;
                 printf("Received data from another robot:\ncmd_id: 0x%04hx sender_id: 0x%04hx ",buf.robot_interaction_data.header.data_cmd_id,buf.robot_interaction_data.header.sender_id);
                 //比赛模式会关停printf输出
                 #ifndef NDEBUG
@@ -156,6 +214,8 @@ namespace rm
                     //我决定把所有的装逼的无锁同步功能全部改成有锁的，爱带锁这一块
                     //当然，单个标志位只需要原子操作就行
                     case 0x0279: //Receive ally pos from sentry
+                        if(!payload_long_enough(buf,sizeof(buf.robot_interaction_data.header)+sizeof(buf.robot_interaction_data.robot_pos)))
+                            break;
                         for(size_t i=0;i<6;++i)
                             if(pos_cache[i+6]>=0&&buf.robot_interaction_data.robot_pos.data[i*2]>0&&buf.robot_interaction_data.robot_pos.data[i*2+1]>0)
                             {
@@ -168,6 +228,8 @@ namespace rm
                 }
             break;
             case 0x0A01:
+                if(!payload_long_enough(buf,sizeof(buf.radio_position_data)))
+                    break;
                 // Wire order is 1, reserved, 3, 4, reserved, 7.  Keep the
                 // application-facing six-slot layout (hero, engineer,
                 // infantry 3/4/5, sentry) and leave the reserved slot empty.
@@ -190,6 +252,8 @@ namespace rm
                 }
             break;
             case 0x0A02:
+                if(!payload_long_enough(buf,sizeof(buf.radio_hp_data)))
+                    break;
                 printf("HP from radio: %hu %hu %hu %hu %hu %hu",
                     buf.radio_hp_data.robot_1,buf.radio_hp_data.reserved_1,
                     buf.radio_hp_data.robot_3,buf.radio_hp_data.robot_4,
@@ -199,6 +263,8 @@ namespace rm
                 printf("\n");
             break;
             case 0x0A03:
+                if(!payload_long_enough(buf,sizeof(buf.radio_ammo_data)))
+                    break;
                 for(size_t i=0;i<sizeof(ammo_from_radio);++i)
                     reinterpret_cast<volatile uint8_t*>(&ammo_from_radio)[i]=reinterpret_cast<const uint8_t*>(&buf.radio_ammo_data)[i];
                 printf("Ammo from radio: %hu %hu %hu %hu %hu\n",
@@ -207,6 +273,8 @@ namespace rm
                     buf.radio_ammo_data.robot_7);
             break;
             case 0x0A04:
+                if(!payload_long_enough(buf,sizeof(buf.radio_team_status)))
+                    break;
                 for(size_t i=0;i<sizeof(team_status_from_radio);++i)
                     reinterpret_cast<volatile uint8_t*>(&team_status_from_radio)[i]=reinterpret_cast<const uint8_t*>(&buf.radio_team_status)[i];
                 printf("Team status from radio: coins=%hu total=%hu buffs=0x%08x terrain=0x%08x\n",
@@ -214,16 +282,26 @@ namespace rm
                     buf.radio_team_status.active_buffs,buf.radio_team_status.terrain_and_control);
             break;
             case 0x0A05:
+                if(!payload_long_enough(buf,sizeof(buf.radio_buff_data)))
+                    break;
                 for(size_t i=0;i<sizeof(buffs_from_radio);++i)
                     reinterpret_cast<volatile uint8_t*>(&buffs_from_radio)[i]=reinterpret_cast<const uint8_t*>(&buf.radio_buff_data)[i];
                 printf("Buff/status from radio updated\n");
             break;
             case 0x0A06:
-                printf("Password: ");
-                for(size_t i=0;i<sizeof(buf.password)/sizeof(uint8_t);++i)
-                    printf("%c",buf.password[i]);
-                printf("\n");
-                memcpy(&guessed_password,&buf.password,sizeof(guessed_password)),password_retries=3;
+                if(!payload_long_enough(buf,sizeof(buf.password)))
+                    break;
+                // 0x0A06 以 10Hz 重复发送同一个密钥；只有内容变化时才重新发起
+                // 验证，否则不仅刷屏，还会撞上“验证后 10 秒内再次更新无效”的限制。
+                if(memcmp(&guessed_password,&buf.password,sizeof(guessed_password))!=0)
+                {
+                    printf("New opponent password: ");
+                    for(size_t i=0;i<sizeof(buf.password)/sizeof(uint8_t);++i)
+                        printf("%c",buf.password[i]);
+                    printf("\n");
+                    memcpy(&guessed_password,&buf.password,sizeof(guessed_password));
+                    password_retries=3;
+                }
             break;
             #ifndef NDEBUG
             default:
@@ -232,7 +310,7 @@ namespace rm
             #endif
         }
     }
-    void msg::receive(serial::stream& src, union frame& buf, bool(*reopen)(serial::stream&))
+    void msg::receive(serial::stream& src, union frame& buf, std::function<bool(serial::stream&)> reopen)
     {
         ssize_t state;
         while(running)
@@ -250,6 +328,8 @@ namespace rm
                     continue;
                 }
                 state=src.read_wCRC8(&buf.header,sizeof(buf.header),1); //Read the rest of header
+                if(state==serial::stream::kChecksumMismatch)
+                    continue; //帧头 CRC8 错，丢弃并重新找 0xA5
                 if(state<=0)
                     break;
                 else if((state-=static_cast<ssize_t>(sizeof(buf.header)-1))<0) //Read failed
@@ -268,6 +348,13 @@ namespace rm
                 fprintf(stderr,"\n");
                 #endif
                 state=src.read_wCRC16(&buf.data,sizeof(buf.header)+sizeof(buf.cmd_id)+buf.header.data_length+sizeof(frame_tail),sizeof(buf.header));
+                if(state==serial::stream::kChecksumMismatch)
+                {
+                    #ifndef NDEBUG
+                    fprintf(stderr,"CRC16 mismatch, cmd_id: 0x%04hx\n",buf.cmd_id);
+                    #endif
+                    continue; //坏帧，重新同步即可，不要断开串口
+                }
                 if(state<=0)
                     break;
                 else if((state-=static_cast<ssize_t>(sizeof(buf.cmd_id)+buf.header.data_length+sizeof(frame_tail)))<0)
@@ -283,7 +370,7 @@ namespace rm
             }
             if(running)
             {
-                fprintf(stderr,"Fatal error detected\n");
+                fprintf(stderr,"Fatal I/O error detected\n");
                 if(reopen)
                     while(running&&!reopen(src))
                         std::this_thread::sleep_for(std::chrono::milliseconds(250));
@@ -302,7 +389,8 @@ namespace rm
         buf.cmd_id=cmd_id;
         const size_t buf_len=sizeof(buf.header)+sizeof(buf.cmd_id)+buf.header.data_length+sizeof(frame_tail);
         Append_CRC8_Check_Sum(reinterpret_cast<uint8_t*>(&buf.header),sizeof(buf.header));
-        memcpy(buf.data+sizeof(buf.header)+sizeof(buf.cmd_id),data,data_length);
+        if(data_length)
+            memcpy(buf.data+sizeof(buf.header)+sizeof(buf.cmd_id),data,data_length);
         #ifndef NDEBUG
         fprintf(stderr,"Sending data: ");
         for(size_t i=0;i<buf_len;++i)
@@ -323,19 +411,50 @@ namespace rm
             }
             uint8_t team=serial_info.robot_id/100;
             union both_robot_pos pos{};
+            bool known[sizeof(pos)/sizeof(float)]{}; //pos 中哪些槽位本轮有真实值
             timer::time_point target=timer::now()+interval;
             if(timer::now()>timestamp[0])
             {
                 size_t count=0;
                 for(size_t i=0;i<sizeof(pos_cache)/sizeof(int8_t);++i)
                     if(pos_cache[i]>0&&--pos_cache[i])
-                        pos.data[i*2]=pos_from_sentry.data[i*2],pos.data[i*2+1]=pos_from_sentry.data[i*2+1],++count; //Override pos with sentry's
-                    else if(pos_cache[i]<0&&++pos_cache[i])
-                        pos.data[i*2]=static_cast<float>(pos_from_radio.data[i*2]),pos.data[i*2+1]=static_cast<float>(pos_from_radio.data[i*2+1]),++count; //Override pos with radio's
-                for(size_t i=0,id;i<pos_from_camera.second.size();++i)
-                    if(pos_from_camera.second[i]!=(uint8_t)-1&&((id=std::find(robot_classes[team].begin(),robot_classes[team].end(),pos_from_camera.second[i])-robot_classes[team].begin())<6||(id=6+std::find(robot_classes[!team].begin(),robot_classes[!team].end(),pos_from_camera.second[i])-robot_classes[!team].begin())<12)&&!pos_cache[id])
                     {
-                        pos.data[id*2]=pos_from_camera.first[i].x,pos.data[id*2+1]=pos_from_camera.first[i].y,++count;
+                        //Sentry reports ally positions in metres
+                        pos.data[i*2]=pos_from_sentry.data[i*2],pos.data[i*2+1]=pos_from_sentry.data[i*2+1];
+                        known[i*2]=known[i*2+1]=true,++count;
+                    }
+                    else if(pos_cache[i]<0&&++pos_cache[i])
+                    {
+                        //Radio reports opponent positions in centimetres; convert to metres
+                        pos.data[i*2]=static_cast<float>(pos_from_radio.data[i*2])/100.f;
+                        pos.data[i*2+1]=static_cast<float>(pos_from_radio.data[i*2+1])/100.f;
+                        known[i*2]=known[i*2+1]=true,++count;
+                    }
+                if(robot_classes.size()>=2)
+                    for(size_t i=0;i<pos_from_camera.second.size()&&i<pos_from_camera.first.size();++i)
+                    {
+                        const uint8_t id_from_camera=pos_from_camera.second[i];
+                        if(id_from_camera==(uint8_t)-1)
+                            continue;
+                        //Slots 0..5 are the opponent half, 6..11 the ally half,
+                        //the same convention as 0x0A01 and 0x0279 below.
+                        size_t id;
+                        auto it=std::find(robot_classes[!team].begin(),robot_classes[!team].end(),id_from_camera);
+                        if(it!=robot_classes[!team].end()&&static_cast<size_t>(it-robot_classes[!team].begin())<6)
+                            id=static_cast<size_t>(it-robot_classes[!team].begin());
+                        else
+                        {
+                            it=std::find(robot_classes[team].begin(),robot_classes[team].end(),id_from_camera);
+                            if(it==robot_classes[team].end())
+                                continue;
+                            id=6+static_cast<size_t>(it-robot_classes[team].begin());
+                            if(id>=12)
+                                continue;
+                        }
+                        if(pos_cache[id])
+                            continue;
+                        pos.data[id*2]=pos_from_camera.first[i].x,pos.data[id*2+1]=pos_from_camera.first[i].y;
+                        known[id*2]=known[id*2+1]=true,++count;
                         #ifndef NDEBUG
                         fprintf(stderr,"Robot %zu: (%.2f,%.2f)\n",id,pos_from_camera.first[i].x,pos_from_camera.first[i].y);
                         #endif
@@ -343,44 +462,55 @@ namespace rm
                 if(persistent_cache||count>0)
                 {
                     //Send pos
-                    static union both_map_robot buf; //Send cached pos when not found
+                    static union both_map_robot buf{}; //Send cached pos when not found
                     if(persistent_cache)
                     {
-                        //Guess drone's pos
+                        //Legacy guess for slot pair 8/9 based on match time.
+                        //Units are metres, same as camera and sentry positions.
                         pos.data[9]=team?15-1.82:1.82;
                         if(serial_info.stage_remain_time<400)
                             pos.data[8]=14;
                         else
                             pos.data[8]=team?400+14-serial_info.stage_remain_time:28-(400+14-serial_info.stage_remain_time);
+                        known[8]=known[9]=true;
                     }
                     else memset(&buf,0,sizeof(buf));
                     for(size_t i=0;i<sizeof(pos)/sizeof(float);++i)
-                        if(pos.data[i]!=0)
+                        if(known[i])
                             buf.data[i]=std::max(pos.data[i]*100,1.f); //Convert unit (m->cm) and ensure not overflow
                     if(referee_send(0x0305,sizeof(buf),&buf))
                     {
                         #ifndef NDEBUG
                         fprintf(stderr,"Sent data to server\n");
                         #endif
-                        timestamp[0]+=std::chrono::milliseconds(100);
+                        // 0x0305 协议上限 5Hz（表 1-5），不能按 interval=100ms 发。
+                        timestamp[0]+=std::chrono::milliseconds(200);
                     }
                 }
             }
             if(timer::now()>timestamp[1])
             {
-                if(serial_info.game_progress==4&&(serial_info.vulnerability>0||serial_info.encrypt_changeable||password_retries>0||armor_fortify))
+                const uint8_t radar_cmd_target=std::min(vulnerated,cmd);
+                if(serial_info.game_progress==4&&(radar_cmd_sent<radar_cmd_target||serial_info.vulnerability>0||serial_info.encrypt_changeable||password_retries>0||armor_fortify))
                 {
                     //Send cmd
                     struct robot_interaction_data buf{};
                     buf.header={0x0121,serial_info.robot_id,0x8080};
-                    buf.cmd.radar_cmd=std::min(vulnerated,cmd);
+                    // 协议要求 radar_cmd 单调且每次只能 +1（表 1-34），
+                    // 即使两次发送之间 vulnerated 跳了，也要逐帧补上。
+                    if(radar_cmd_sent<radar_cmd_target)
+                        ++radar_cmd_sent;
+                    buf.cmd.radar_cmd=radar_cmd_sent;
                     buf.cmd.password_cmd=(password_retries>0?2:0);
                     if(buf.cmd.password_cmd)
                         memcpy(&buf.cmd.password,&guessed_password,sizeof(guessed_password)),--password_retries;
-                    else if((buf.cmd.password_cmd=serial_info.encrypt_changeable)!=0)
+                    else if(serial_info.encrypt_changeable&&!password_update_sent)
                     {
+                        // 每次获得修改权限只换一次密钥，避免 10Hz 反复随机换密钥。
                         std::vector<uint8_t> pwd=generate_password(6);
                         memcpy(&buf.cmd.password,pwd.data(),pwd.size());
+                        buf.cmd.password_cmd=1;
+                        password_update_sent=true;
                     }
                     buf.cmd.armor_fortify_cmd=armor_fortify;
                     buf.cmd.fortify_center_x=fortify_center_x;
@@ -434,19 +564,37 @@ namespace rm
     }
     bool msg::run(const char* referee_tty, const char* radio_host, uint16_t radio_port)
     {
-        if(referee.get_fd()<0&&!serial_quick_setup(referee,referee_tty))
+        // 已经通过构造函数传入 fd 时这里只重新配置 termios，不会重开设备。
+        if(!serial_quick_setup(referee,referee_tty))
             return false;
         running=true;
-        rx=std::thread(&rm::msg::receive,this,std::ref(referee),std::ref(recv_buf),[](serial::stream& s){return serial_quick_setup(static_cast<serial::terminal&>(s));}),tx=std::thread(&rm::msg::poll,this);
+        const std::string referee_path=referee_tty?referee_tty:"";
+        const std::string radio_path=radio_host?radio_host:"";
+        const uint16_t radio_port_copy=radio_port;
+        rx=std::thread(&rm::msg::receive,this,std::ref(referee),std::ref(recv_buf),
+            [referee_path](serial::stream& s)
+            {
+                s.close(); //丢掉坏掉的 fd，再按 run() 传入的路径重开
+                return serial_quick_setup(static_cast<serial::terminal&>(s),referee_path.empty()?nullptr:referee_path.c_str());
+            }),
+            tx=std::thread(&rm::msg::poll,this);
         if(radio.get_fd()<0&&radio_host&&radio_port)
             radio.connect(radio_host,radio_port);
-        if(radio.get_fd()>=0)
-            rf=std::thread(&rm::msg::receive,this,std::ref(radio),std::ref(rf_buf),nullptr);
+        if(radio_host&&radio_port)
+            // 即使首次连接失败也启动接收线程，receive() 会周期重试 connect。
+            rf=std::thread(&rm::msg::receive,this,std::ref(radio),std::ref(rf_buf),
+                [this,radio_path,radio_port_copy](serial::stream&)
+                {
+                    return !radio_path.empty()&&radio_port_copy&&radio.connect(radio_path.c_str(),radio_port_copy)==0;
+                });
         return true;
     }
     void msg::stop(void)
     {
         running=false;
+        // 先 shutdown 唤醒阻塞在 read 上的 TCP 接收线程，再 close，避免 join 卡死。
+        if(radio.get_fd()>=0)
+            ::shutdown(radio.get_fd(),SHUT_RDWR);
         radio.close();
         referee.close();
         if(tx.joinable())

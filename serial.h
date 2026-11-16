@@ -50,6 +50,10 @@ protected:
     }
 
 public:
+    // CRC 校验失败（数据已被读走，调用方应重新同步帧头，而不是重连）。
+    // 用 -2 与 ::read 的错误返回值 -1、EOF/超时的 0 区分开。
+    static constexpr ssize_t kChecksumMismatch = -2;
+
     explicit stream(int fd = -1) : fd_(fd) {}
     virtual ~stream() = default;
 
@@ -72,7 +76,7 @@ public:
             return result;
         return Verify_CRC8_Check_Sum(bytes, length)
                    ? static_cast<ssize_t>(length)
-                   : static_cast<ssize_t>(-1);
+                   : kChecksumMismatch;
     }
 
     // Read the part after `offset`, then verify the complete CRC16-protected
@@ -86,7 +90,7 @@ public:
             return result;
         return Verify_CRC16_Check_Sum(bytes, length)
                    ? static_cast<ssize_t>(length)
-                   : static_cast<ssize_t>(-1);
+                   : kChecksumMismatch;
     }
 
     void close() {

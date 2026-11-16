@@ -2,7 +2,9 @@
 #define _MESSENGER_H_
 
 #include "serial.h"
+#include <atomic>
 #include <chrono>
+#include <functional>
 #include <stdint.h>
 #include <vector>
 #include <thread>
@@ -34,7 +36,9 @@ namespace rm
     };
     //TODO 无
     // 0x0003 血量、基地血量和累计控制度，服务器每 3 Hz 发送。
-    // sizeof = 24 字节：12 × uint16（struct 视图和 data[12] 都是 24）。
+    // sizeof = 24 字节：12 × uint16（协议表 1-8 固定 24 字节）。
+    // 注意：outpost_R_HP / outpost_B_HP 是绝对的红/蓝前哨血量，己方是哪边
+    //       由 robot_id 决定；ally_base_HP / enemy_base_HP 已经相对己方。
     union game_robot_HP
     {
         struct
@@ -64,12 +68,12 @@ namespace rm
         uint8_t offending_robot_id;
         uint8_t count;
     };
-    // 0x0105 飞镖发射站状态。雷达当前只接收，不主动使用。
-    // sizeof = 3 字节：remaining_time(1) + 一个 uint16_t 位域单元(2)。
-    // 实测（GCC x86-64，小端）：byte1 = shot(bit0-2) | count(bit3-5) | target(bit6-7)，
-    //   target 的最高位 bit8 落到 byte2 的 bit0；reserved 占 bit9-15（byte2 的 bit1-7）。
-    // 注意：若改成 uint8_t 位域，target 会整个落到第 3 个字节，sizeof 变成 4 字节，
-    //       两种写法的线上位布局不同，务必对照 2027 协议确认。
+    // 0x0105 飞镖发射站状态（协议表 1-11）。
+    // 官方结构：uint8_t dart_remaining_time + uint16_t dart_info，共 3 字节。
+    //   bit0-2  dart_shot   = 最近一次己方飞镖击中的目标（0 默认，1 R 前哨，6 B 前哨）
+    //   bit3-5  dart_count  = 对方最近被击中的目标累计次数（上限 4）
+    //   bit6-8  dart_target = 当前选定的击打目标（0 默认/前哨站，1-4 基地目标）
+    //   bit9-15 保留
 
     struct dart_info
     {
@@ -79,12 +83,10 @@ namespace rm
         uint16_t dart_target : 3;
         uint16_t reserved : 7;
     };
-    // 0x0201 本机机器人状态，主控模块发送给对应机器人。
+    // 0x0201 本机机器人状态，主控模块发送给对应机器人（协议表 1-12）。
     // sizeof = 17 字节：robot_id(1) + level(1) + 5 × uint16(10)
     //                   + bullet_speed_limit(float, 4) + power_management 位域(1)。
-    // 注意：常见官方 0x0201 robot_status_t 是 13 字节，bullet_speed_limit（float）
-    //       一般属于 0x0202 射击状态。本文件和 tools/rm2027_referee_sim.py 都按
-    //       17 字节收发，两处虽然自洽，但请对照 2027 协议 V1.0.0 核实 0x0201 布局。
+    // 2027 协议把射击初速度上限（float，偏移 12）放进了 0x0201，与官方一致。
     struct robot_status
     {
         uint8_t robot_id;
@@ -103,10 +105,10 @@ namespace rm
     //TODO 无
     // 2027 protocol, command 0x020C.  This is the mark progress for the
     // selected radar target, not the 2026 foe/ally bit masks.
-    // 0x020C 雷达标记进度，范围通常为 0 到 150。
-    // sizeof = 2 字节：单个 uint16_t mark_progress。
-    // 注意：serial_info 里的 mark_progress 仍被注释掉，messenger.cpp 第 124 行
-    //       赋值 serial_info.mark_progress 时编译失败（见下方 TODO）。
+    // 0x020C 雷达标记进度（协议表 1-22），固定 2 字节。
+    // 官方结构就是 uint16_t mark_progress，按位表示各机器人是否被标记：
+    //   bit0 对方 1 号、bit2 对方 3 号、bit3 对方 4 号、bit5 对方哨兵；
+    //   bit6 己方 1 号、bit8 己方 3 号、bit9 己方 4 号、bit11 己方哨兵，其余保留。
     //TODO
     //TODO 无
     //TODO 无
@@ -350,9 +352,9 @@ namespace rm
     #pragma pack(pop)
     // 供雷达业务逻辑读取的已解析状态，不是裁判系统的原始数据帧。
     // 注意：本结构体在 #pragma pack(pop) 之后，按默认对齐（对齐要求 2 字节）。
-    // sizeof = 18 字节：6（3 × uint16）+ 1（robot_id）+ 1（game_progress 位域）
-    //   + 1（foe_mark）+ 1（ally_mark）+ 2（其余位域）+ 6（3 × uint16）。
-    //   实测 fortify_center_x 在偏移 12，fortify_radius 在偏移 16，结束于 18。
+    // sizeof = 20 字节：6（3 × uint16）+ 1（robot_id）+ 1（game_progress 位域）
+    //   + 2（mark_progress）+ 1（foe_mark）+ 1（ally_mark）+ 2（其余位域）
+    //   + 6（3 × uint16）。实测 fortify_center_x 在偏移 14，fortify_radius 在偏移 18。
     struct serial_info
     {
         uint16_t stage_remain_time;
@@ -360,8 +362,7 @@ namespace rm
         uint16_t foe_outpost_base_HP;
         uint8_t robot_id;
         uint8_t game_progress:3;
-        // uint16_t mark_progress;
-        //TODO
+        uint16_t mark_progress;
         // Kept for source compatibility with the 2026 consumer code.  They
         // are always zero in 2027; use mark_progress instead.
         uint8_t foe_mark;
@@ -384,11 +385,15 @@ namespace rm
         std::chrono::steady_clock::time_point timestamp[3];
         volatile uint8_t cmd;
         uint8_t seq;
-        bool running;
+        std::atomic<bool> running;
+        std::atomic<bool> password_update_sent;
+        std::atomic<uint8_t> radar_cmd_sent; //上次实际发出的 radar_cmd，保证每次只 +1
         std::thread rx,tx,rf;
         void referee_callback(union frame& buf);
         void poll(void);
-        void receive(serial::stream& src, union frame& buf, bool(*reopen)(serial::stream&));
+        // reopen 为空表示不重连（例如 TCP 线程退出）；否则收到 I/O 错误后
+        // 由 reopen 负责重建连接，成功返回 true。
+        void receive(serial::stream& src, union frame& buf, std::function<bool(serial::stream&)> reopen);
     public:
         serial::terminal referee;
         serial::tcp radio;
@@ -414,7 +419,7 @@ namespace rm
         volatile uint8_t armor_fortify;
         volatile uint16_t fortify_center_x;
         volatile uint16_t fortify_center_y;
-        msg(int referee_fd=-1, int radio_fd=-1):recv_buf{},rf_buf{},timestamp{timer::now(),timer::now(),timer::now()},cmd(0),seq(0),running(false),referee(referee_fd),radio(radio_fd),serial_info{},pos_from_camera{},pos_from_sentry{},pos_from_radio{},hp_from_radio{},ammo_from_radio{},team_status_from_radio{},buffs_from_radio{},pos_cache{0},guessed_password{0},password_retries(0),vulnerated(0),armor_fortify(0),fortify_center_x(0),fortify_center_y(0){}
+        msg(int referee_fd=-1, int radio_fd=-1):recv_buf{},rf_buf{},timestamp{timer::now(),timer::now(),timer::now()},cmd(0),seq(0),running(false),password_update_sent(false),radar_cmd_sent(0),referee(referee_fd),radio(radio_fd),serial_info{},pos_from_camera{},pos_from_sentry{},pos_from_radio{},hp_from_radio{},ammo_from_radio{},team_status_from_radio{},buffs_from_radio{},pos_cache{0},guessed_password{0},password_retries(0),vulnerated(0),armor_fortify(0),fortify_center_x(0),fortify_center_y(0){}
         msg(const msg&)=delete; //Prevents thread problems
         msg& operator=(const msg&)=delete;
         msg(msg&&)=default;
