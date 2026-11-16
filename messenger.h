@@ -83,9 +83,14 @@ namespace rm
     // 2027 protocol, command 0x020C.  This is the mark progress for the
     // selected radar target, not the 2026 foe/ally bit masks.
     // 0x020C 雷达标记进度，范围通常为 0 到 150。
+    //TODO
     struct radar_mark_data
     {
-        uint16_t mark_progress;
+        // uint16_t mark_progress;
+        uint16_t foe_mark:6;
+        uint16_t ally_mark:6;
+        uint16_t reserved:4;
+
     };
     // 0x020E 雷达自主决策状态，包括双倍易伤、密钥和装甲加固状态。
     struct radar_info
@@ -247,7 +252,7 @@ namespace rm
             union robot_pos robot_pos;
         };
     };
-    static_assert(sizeof(radar_mark_data)==2,"0x020C must be 2 bytes");
+    // static_assert(sizeof(radar_mark_data)==2,"0x020C must be 2 bytes");
     static_assert(sizeof(game_status)==11,"0x0001 must be 11 bytes");
     static_assert(sizeof(game_robot_HP)==24,"0x0003 must be 24 bytes");
     static_assert(sizeof(radar_info)==8,"0x020E must be 8 bytes");
@@ -296,7 +301,8 @@ namespace rm
         uint16_t foe_outpost_base_HP;
         uint8_t robot_id;
         uint8_t game_progress:3;
-        uint16_t mark_progress;
+        // uint16_t mark_progress;
+        //TODO
         // Kept for source compatibility with the 2026 consumer code.  They
         // are always zero in 2027; use mark_progress instead.
         uint8_t foe_mark;

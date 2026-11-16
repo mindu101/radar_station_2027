@@ -119,8 +119,8 @@ namespace rm
                 serial_info.robot_id=buf.robot_status.robot_id;
             break;
             case 0x020C:
+            //TODO 有问题
                 serial_info.mark_progress=buf.radar_mark_data.mark_progress;
-                printf("Radar mark progress: %hu\n",serial_info.mark_progress);
             break;
             case 0x020E:
                 printf("Double vulnerabilities: %hhu%c\n",buf.radar_info.vulnerability,buf.radar_info.vulnerating?'*':' ');
