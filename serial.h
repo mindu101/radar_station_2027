@@ -3,6 +3,7 @@
 
 #include "RM_CRC.h"
 
+#include <atomic>
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
@@ -17,7 +18,8 @@ namespace serial {
 
 class stream {
 protected:
-    int fd_ = -1;
+    // 读写线程和 stop() 会并发访问 fd，用原子量避免 close 与 read 之间的数据竞争。
+    std::atomic<int> fd_{-1};
 
     static ssize_t read_exact(int fd, uint8_t* buffer, std::size_t length) {
         std::size_t received = 0;
@@ -57,21 +59,23 @@ public:
     explicit stream(int fd = -1) : fd_(fd) {}
     virtual ~stream() = default;
 
-    int get_fd() const { return fd_; }
+    int get_fd() const { return fd_.load(); }
 
     ssize_t read(void* buffer, std::size_t length) {
-        if (fd_ < 0)
+        const int fd = fd_.load();
+        if (fd < 0)
             return -1;
-        return ::read(fd_, buffer, length);
+        return ::read(fd, buffer, length);
     }
 
     // Read the part after `offset`, then verify the complete CRC8-protected
     // buffer. The return value is the complete buffer length on success.
     ssize_t read_wCRC8(void* buffer, std::size_t length, std::size_t offset) {
-        if (fd_ < 0 || offset > length)
+        const int fd = fd_.load();
+        if (fd < 0 || offset > length)
             return -1;
         auto* bytes = static_cast<uint8_t*>(buffer);
-        const ssize_t result = read_exact(fd_, bytes + offset, length - offset);
+        const ssize_t result = read_exact(fd, bytes + offset, length - offset);
         if (result != static_cast<ssize_t>(length - offset))
             return result;
         return Verify_CRC8_Check_Sum(bytes, length)
@@ -82,10 +86,11 @@ public:
     // Read the part after `offset`, then verify the complete CRC16-protected
     // buffer. The return value is the complete buffer length on success.
     ssize_t read_wCRC16(void* buffer, std::size_t length, std::size_t offset) {
-        if (fd_ < 0 || offset > length)
+        const int fd = fd_.load();
+        if (fd < 0 || offset > length)
             return -1;
         auto* bytes = static_cast<uint8_t*>(buffer);
-        const ssize_t result = read_exact(fd_, bytes + offset, length - offset);
+        const ssize_t result = read_exact(fd, bytes + offset, length - offset);
         if (result != static_cast<ssize_t>(length - offset))
             return result;
         return Verify_CRC16_Check_Sum(bytes, length)
@@ -94,10 +99,10 @@ public:
     }
 
     void close() {
-        if (fd_ >= 0) {
-            ::close(fd_);
-            fd_ = -1;
-        }
+        // exchange 保证同一个 fd 只被 close 一次。
+        const int fd = fd_.exchange(-1);
+        if (fd >= 0)
+            ::close(fd);
     }
 };
 
@@ -106,21 +111,22 @@ public:
     termios options{};
 
     explicit terminal(int fd = -1) : stream(fd) {
-        if (fd_ >= 0)
-            ::tcgetattr(fd_, &options);
+        if (fd >= 0)
+            ::tcgetattr(fd, &options);
     }
 
     int open(const char* filename = nullptr) {
         close();
         const char* device = filename ? filename : "/dev/ttyUSB0";
-        fd_ = ::open(device, O_RDWR | O_NOCTTY | O_SYNC);
-        if (fd_ < 0)
+        const int fd = ::open(device, O_RDWR | O_NOCTTY | O_SYNC);
+        if (fd < 0)
             return -1;
-        if (::tcgetattr(fd_, &options) < 0) {
+        fd_.store(fd);
+        if (::tcgetattr(fd, &options) < 0) {
             close();
             return -1;
         }
-        return fd_;
+        return fd;
     }
 
     int set_rate(speed_t rate) {
@@ -128,17 +134,19 @@ public:
     }
 
     int apply_options() {
-        return fd_ >= 0 ? ::tcsetattr(fd_, TCSANOW, &options) : -1;
+        const int fd = fd_.load();
+        return fd >= 0 ? ::tcsetattr(fd, TCSANOW, &options) : -1;
     }
 
     ssize_t write_wCRC16(void* buffer, std::size_t length) {
-        if (fd_ < 0 || !buffer || length < 3)
+        const int fd = fd_.load();
+        if (fd < 0 || !buffer || length < 3)
             return -1;
         // referee_send owns this frame buffer, so appending the checksum in
         // place is safe and avoids an extra allocation on every packet.
         auto* bytes = static_cast<uint8_t*>(buffer);
         Append_CRC16_Check_Sum(bytes, length);
-        return write_all(fd_, bytes, length);
+        return write_all(fd, bytes, length);
     }
 };
 
@@ -166,7 +174,7 @@ public:
             if (candidate < 0)
                 continue;
             if (::connect(candidate, address->ai_addr, address->ai_addrlen) == 0) {
-                fd_ = candidate;
+                fd_.store(candidate);
                 result = 0;
                 break;
             }
@@ -177,9 +185,10 @@ public:
     }
 
     ssize_t write(const void* buffer, std::size_t length) {
-        if (fd_ < 0 || !buffer)
+        const int fd = fd_.load();
+        if (fd < 0 || !buffer)
             return -1;
-        return write_all(fd_, static_cast<const uint8_t*>(buffer), length);
+        return write_all(fd, static_cast<const uint8_t*>(buffer), length);
     }
 };
 

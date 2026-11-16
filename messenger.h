@@ -5,7 +5,9 @@
 #include <atomic>
 #include <chrono>
 #include <functional>
+#include <mutex>
 #include <stdint.h>
+#include <utility>
 #include <vector>
 #include <thread>
 #include "opencv2/core.hpp"
@@ -377,17 +379,48 @@ namespace rm
         uint16_t fortify_center_y;
         uint16_t fortify_radius;
     };
+    // 相机坐标缓存：视觉线程每周期整体写入，发送线程只取快照。
+    // 保留原来的赋值写法：pos_from_camera = std::make_pair(points, ids);
+    class camera_positions
+    {
+    public:
+        using value_type=std::pair<std::vector<cv::Point2f>,std::vector<uint8_t>>;
+
+        camera_positions()=default;
+        camera_positions(const camera_positions&)=delete;
+        camera_positions& operator=(const camera_positions&)=delete;
+
+        camera_positions& operator=(value_type value)
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            data_=std::move(value);
+            return *this;
+        }
+
+        value_type snapshot() const
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            return data_;
+        }
+
+    private:
+        mutable std::mutex mutex_;
+        value_type data_;
+    };
     // 雷达通信管理类，负责串口/TCP 接收线程、周期发送线程和状态缓存。
     class msg
     {
         union frame recv_buf;
         union frame rf_buf;
         std::chrono::steady_clock::time_point timestamp[3];
-        volatile uint8_t cmd;
+        std::atomic<uint8_t> cmd;
+        std::atomic<uint8_t> pre_dart_target;
         uint8_t seq;
         std::atomic<bool> running;
         std::atomic<bool> password_update_sent;
         std::atomic<uint8_t> radar_cmd_sent; //上次实际发出的 radar_cmd，保证每次只 +1
+        mutable std::mutex state_mutex; //保护下面所有跨线程共享的状态
+        std::mutex radio_mutex; //保护 TCP 的 connect/shutdown/close 不与重连线程打架
         std::thread rx,tx,rf;
         void referee_callback(union frame& buf);
         void poll(void);
@@ -401,29 +434,44 @@ namespace rm
         static std::vector<std::vector<uint8_t>> robot_classes; //HERO=0,ENGINEER,INFANTRY3,INFANTRY4,INFANTRY5,SENTRY
         static std::chrono::milliseconds interval;
         static bool persistent_cache; //Send robot's last pos if lost, and guess drone's pos, instead of ignoring
-        volatile struct serial_info serial_info;
-        std::pair<std::vector<cv::Point2f>, std::vector<uint8_t>> pos_from_camera;
-        volatile union both_robot_pos pos_from_sentry;
-        volatile union map_robot pos_from_radio;
-        volatile struct radio_hp_data hp_from_radio;
-        volatile struct radio_ammo_data ammo_from_radio;
-        volatile struct radio_team_status team_status_from_radio;
-        volatile struct radio_buff_data buffs_from_radio;
-        volatile int8_t pos_cache[12]; //Cache control, positive for sentry, negative for radio and zero for video
+        // 以下共享状态由 msg 内部用 state_mutex 加锁保护。外部线程直接读单个
+        // 字段仍兼容，但需要多字段一致时请调用 get_serial_info()。
+        struct serial_info serial_info;
+        camera_positions pos_from_camera;
+        union both_robot_pos pos_from_sentry;
+        union map_robot pos_from_radio;
+        struct radio_hp_data hp_from_radio;
+        struct radio_ammo_data ammo_from_radio;
+        struct radio_team_status team_status_from_radio;
+        struct radio_buff_data buffs_from_radio;
+        int8_t pos_cache[12]; //Cache control, positive for sentry, negative for radio and zero for video
         uint8_t guessed_password[6];
-        volatile uint8_t password_retries;
-        volatile uint8_t vulnerated; //Double vulnerability trigger
+        std::atomic<uint8_t> password_retries;
+        std::atomic<uint8_t> vulnerated; //Double vulnerability trigger
         // Commands controlled by the radar application.  Each counter is
         // monotonic; the referee ignores a repeated value as required by
         // protocol 0x0121.
-        volatile uint8_t armor_fortify;
-        volatile uint16_t fortify_center_x;
-        volatile uint16_t fortify_center_y;
-        msg(int referee_fd=-1, int radio_fd=-1):recv_buf{},rf_buf{},timestamp{timer::now(),timer::now(),timer::now()},cmd(0),seq(0),running(false),password_update_sent(false),radar_cmd_sent(0),referee(referee_fd),radio(radio_fd),serial_info{},pos_from_camera{},pos_from_sentry{},pos_from_radio{},hp_from_radio{},ammo_from_radio{},team_status_from_radio{},buffs_from_radio{},pos_cache{0},guessed_password{0},password_retries(0),vulnerated(0),armor_fortify(0),fortify_center_x(0),fortify_center_y(0){}
+        std::atomic<uint8_t> armor_fortify;
+        std::atomic<uint16_t> fortify_center_x;
+        std::atomic<uint16_t> fortify_center_y;
+        msg(int referee_fd=-1, int radio_fd=-1):recv_buf{},rf_buf{},timestamp{timer::now(),timer::now(),timer::now()},cmd(0),pre_dart_target(0),seq(0),running(false),password_update_sent(false),radar_cmd_sent(0),referee(referee_fd),radio(radio_fd),serial_info{},pos_from_camera{},pos_from_sentry{},pos_from_radio{},hp_from_radio{},ammo_from_radio{},team_status_from_radio{},buffs_from_radio{},pos_cache{0},guessed_password{0},password_retries(0),vulnerated(0),armor_fortify(0),fortify_center_x(0),fortify_center_y(0){}
         msg(const msg&)=delete; //Prevents thread problems
         msg& operator=(const msg&)=delete;
-        msg(msg&&)=default;
-        msg& operator=(msg&&)=default;
+        msg(msg&&)=delete;
+        msg& operator=(msg&&)=delete;
+        // 一次性写入装甲加固请求，避免发送线程读到新计数配旧坐标。
+        void request_armor_fortify(uint8_t counter,uint16_t x,uint16_t y)
+        {
+            fortify_center_x.store(x);
+            fortify_center_y.store(y);
+            armor_fortify.store(counter);
+        }
+        // 取一份一致的串口解析状态，供外部显示/决策线程使用。
+        struct serial_info get_serial_info(void) const
+        {
+            std::lock_guard<std::mutex> lock(state_mutex);
+            return serial_info;
+        }
         static bool serial_quick_setup(serial::terminal& port, const char* filename=0);
         static std::vector<uint8_t> generate_password(size_t len);
         bool referee_send(uint16_t cmd_id, uint16_t data_length, const void* data);

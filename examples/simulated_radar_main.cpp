@@ -58,18 +58,19 @@ int main(int argc, char** argv) {
 
     // 模拟视觉程序输出。坐标单位是米，机器人 ID 来自相机识别结果。
     // messenger 会把坐标转换成厘米，并按 0x0305 格式发送。
-    radar.pos_from_camera.first = {
-        cv::Point2f{5.0F, 3.0F},
-        cv::Point2f{7.0F, 4.0F},
-        cv::Point2f{9.0F, 6.0F},
-        cv::Point2f{2.0F, 8.0F},
-    };
-    radar.pos_from_camera.second = {
-        103, // 蓝方 3 号步兵
-        104, // 蓝方 4 号步兵
-        107, // 蓝方哨兵
-        3,   // 红方 3 号步兵
-    };
+    radar.pos_from_camera = std::make_pair(
+        std::vector<cv::Point2f>{
+            cv::Point2f{5.0F, 3.0F},
+            cv::Point2f{7.0F, 4.0F},
+            cv::Point2f{9.0F, 6.0F},
+            cv::Point2f{2.0F, 8.0F},
+        },
+        std::vector<uint8_t>{
+            103, // 蓝方 3 号步兵
+            104, // 蓝方 4 号步兵
+            107, // 蓝方哨兵
+            3,   // 红方 3 号步兵
+        });
 
     // 打开裁判系统串口。对真实设备传 /dev/ttyUSB0，对 PTY 模拟器传
     // 它打印出来的 /dev/pts/N。
@@ -94,23 +95,21 @@ int main(int argc, char** argv) {
 
         // 模拟雷达第一次使用装甲加固机会。计数必须从 0 改为 1。
         if (!armor_request_1_sent && elapsed.count() >= 3) {
-            radar.armor_fortify = 1;
-            radar.fortify_center_x = 2500;
-            radar.fortify_center_y = 1200;
+            const uint16_t center_x = 2500, center_y = 1200;
+            radar.request_armor_fortify(1, center_x, center_y);
             armor_request_1_sent = true;
             std::printf("请求第一次装甲加固: center=(%hu,%hu) mm\n",
-                        radar.fortify_center_x, radar.fortify_center_y);
+                        center_x, center_y);
         }
 
         // 模拟第二次使用。真实程序应当根据 0x020E 的剩余机会字段决定
         // 是否发送，这里只是为了演示计数值递增的格式。
         if (!armor_request_2_sent && elapsed.count() >= 10) {
-            radar.armor_fortify = 2;
-            radar.fortify_center_x = 3000;
-            radar.fortify_center_y = 1500;
+            const uint16_t center_x = 3000, center_y = 1500;
+            radar.request_armor_fortify(2, center_x, center_y);
             armor_request_2_sent = true;
             std::printf("请求第二次装甲加固: center=(%hu,%hu) mm\n",
-                        radar.fortify_center_x, radar.fortify_center_y);
+                        center_x, center_y);
         }
 
         // 这里可以替换成真实视觉线程写入 pos_from_camera 的代码。
