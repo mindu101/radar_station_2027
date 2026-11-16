@@ -88,6 +88,7 @@ namespace rm
                     buf.game_robot_HP.outpost_R_HP,buf.game_robot_HP.ally_base_HP,
                     buf.game_robot_HP.outpost_B_HP,buf.game_robot_HP.enemy_base_HP);
                     //TODO 这里可能默认我方是红色或者直接以前写的没改，感觉是没改
+                    //这个就是有问题，写的死编码，不能这样
                 if(serial_info.game_progress==4&&((buf.game_robot_HP.outpost_R_HP<1000&&vulnerated<1)||(buf.game_robot_HP.ally_base_HP<5000&&vulnerated<2)))
                 {
                     ++vulnerated;
