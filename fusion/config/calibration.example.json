@@ -1,0 +1,9 @@
+{
+  "rotation": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+  "translation": [0.0, 0.0, 0.0],
+  "lidar_frame": "ws_scan",
+  "field_frame": "field",
+  "field_length": 28.0,
+  "field_width": 15.0,
+  "note": "这个文件只是格式示例。请用 scripts/calibrate_field.py 生成真实外参。"
+}

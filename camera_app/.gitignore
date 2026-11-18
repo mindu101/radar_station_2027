@@ -1,0 +1,10 @@
+build/
+install/
+models/*.engine
+log/
+MvSdkLog/
+.vscode/
+.history/
+.cache/
+config.yml
+camera.yml
